@@ -199,3 +199,58 @@ async fn read_write_async() {
     let writer = Vec::new();
     let _ = docx.write_async(writer.compat_write()).await.unwrap();
 }
+
+#[test]
+fn rejects_conflicting_zip_header_names() {
+    use std::io::{Cursor, Read};
+    let mut document = docx_rust::Docx::default();
+    let bytes = document
+        .write(Cursor::new(Vec::new()))
+        .unwrap()
+        .into_inner();
+    assert!(DocxFile::from_reader(Cursor::new(bytes.clone())).is_ok());
+    let mut cloaked = bytes;
+    let name = "word/document.xml";
+    let offset = zip::ZipArchive::new(Cursor::new(&cloaked))
+        .unwrap()
+        .by_name(name)
+        .unwrap()
+        .header_start() as usize
+        + 30;
+    assert_eq!(&cloaked[offset..offset + name.len()], name.as_bytes());
+    cloaked[offset] = b'x';
+    let mut ordinary = zip::ZipArchive::new(Cursor::new(&cloaked)).unwrap();
+    let mut content = String::new();
+    ordinary
+        .by_name(name)
+        .unwrap()
+        .read_to_string(&mut content)
+        .unwrap();
+    assert!(!content.is_empty());
+    let error = DocxFile::from_reader(Cursor::new(cloaked))
+        .err()
+        .expect("conflicting names must be rejected");
+    assert!(error.to_string().contains("filename mismatch"), "{error}");
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_reader_rejects_conflicting_zip_header_names() {
+    use std::io::Cursor;
+    let mut document = docx_rust::Docx::default();
+    let mut bytes = document
+        .write(Cursor::new(Vec::new()))
+        .unwrap()
+        .into_inner();
+    assert!(
+        DocxFile::from_async_reader(futures_lite::io::Cursor::new(bytes.clone()))
+            .await
+            .is_ok()
+    );
+    bytes[30] = b'x';
+    let error = DocxFile::from_async_reader(futures_lite::io::Cursor::new(bytes))
+        .await
+        .err()
+        .expect("conflicting names must be rejected");
+    assert!(error.to_string().contains("filename mismatch"), "{error}");
+}

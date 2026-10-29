@@ -442,6 +442,7 @@ impl DocxFile {
     /// Extracts from reader
     pub fn from_reader<T: Read + Seek>(reader: T) -> DocxResult<Self> {
         let mut zip = ZipArchive::new(reader)?;
+        zip.validate_header_consistency()?;
 
         macro_rules! read {
             ($xml:tt, $name:expr) => {{
@@ -468,7 +469,10 @@ impl DocxFile {
 
         macro_rules! option_read_multiple {
             ($xml:tt, $name:expr) => {{
-                let names: Vec<_> = zip.file_names().map(|x| x.to_string()).collect();
+                let names = zip
+                    .file_names()
+                    .map(|name| name.map(|name| name.into_owned()))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let name_and_value: Vec<_> = names
                     .iter()
                     .filter(|n| n.contains($name))
@@ -486,7 +490,10 @@ impl DocxFile {
 
         macro_rules! option_read_multiple_files {
             ($xml:tt, $name:expr) => {{
-                let names: Vec<_> = zip.file_names().map(|x| x.to_string()).collect();
+                let names = zip
+                    .file_names()
+                    .map(|name| name.map(|name| name.into_owned()))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let name_and_value: Vec<_> = names
                     .iter()
                     .filter(|n| n.contains($name))
@@ -745,89 +752,11 @@ impl DocxFile {
 #[cfg(feature = "async")]
 impl DocxFile {
     #[inline]
-    pub async fn from_async_reader<T: AsyncBufRead + Unpin>(reader: T) -> DocxResult<Self> {
-        use async_zip::base::read::stream::ZipFileReader;
-        let mut reader = ZipFileReader::new(reader);
-
-        let mut docx = DocxFile {
-            app: None,
-            content_types: String::new(),
-            core: None,
-            document: String::new(),
-            document_rels: None,
-            settings_rels: None,
-            font_table: None,
-            rels: String::new(),
-            styles: None,
-            settings: None,
-            web_settings: None,
-            headers: vec![],
-            footers: vec![],
-            themes: vec![],
-            medias: vec![],
-            footnotes: None,
-            endnotes: None,
-            comments: None,
-            numbering: None,
-            custom_xml: vec![],
-        };
-
-        while let Some(mut next) = reader.next_with_entry().await? {
-            let entry_reader = next.reader_mut();
-            let filename = entry_reader.entry().filename().as_str()?.to_string();
-
-            macro_rules! read_to_string {
-                ($field:expr) => {{
-                    let mut buffer = String::new();
-                    entry_reader.read_to_string_checked(&mut buffer).await?;
-                    $field = buffer.into();
-                }};
-            }
-
-            macro_rules! read_multiple_to_string {
-                ($field:expr) => {{
-                    let mut buffer = String::new();
-                    entry_reader.read_to_string_checked(&mut buffer).await?;
-                    $field.push((filename, buffer));
-                }};
-            }
-
-            macro_rules! read_multiple_to_bytes {
-                ($field:expr) => {{
-                    let mut buffer = Vec::new();
-                    entry_reader.read_to_end_checked(&mut buffer).await?;
-                    $field.push((filename, buffer));
-                }};
-            }
-
-            match filename.as_str() {
-                "docProps/app.xml" => read_to_string!(docx.app),
-                "[Content_Types].xml" => read_to_string!(docx.content_types),
-                "docProps/core.xml" => read_to_string!(docx.core),
-                "word/_rels/document.xml.rels" => read_to_string!(docx.document_rels),
-                "word/_rels/settings.xml.rels" => read_to_string!(docx.settings_rels),
-                "word/document.xml" => read_to_string!(docx.document),
-                "word/fontTable.xml" => read_to_string!(docx.font_table),
-                "_rels/.rels" => read_to_string!(docx.rels),
-                "word/styles.xml" => read_to_string!(docx.styles),
-                "word/settings.xml" => read_to_string!(docx.settings),
-                "word/webSettings.xml" => read_to_string!(docx.web_settings),
-                "word/footnotes.xml" => read_to_string!(docx.footnotes),
-                "word/endnotes.xml" => read_to_string!(docx.endnotes),
-                "word/comments.xml" => read_to_string!(docx.comments),
-                "word/numbering.xml" => read_to_string!(docx.numbering),
-                _ if filename.contains("word/header") => read_multiple_to_string!(docx.headers),
-                _ if filename.contains("word/footer") => read_multiple_to_string!(docx.footers),
-                _ if filename.contains("word/theme/theme") => {
-                    read_multiple_to_string!(docx.themes)
-                }
-                _ if filename.contains("word/media") => read_multiple_to_bytes!(docx.medias),
-                _ if filename.contains("custom") => read_multiple_to_bytes!(docx.custom_xml),
-                _ => {}
-            }
-            reader = next.skip().await?;
-        }
-
-        Ok(docx)
+    pub async fn from_async_reader<T: AsyncBufRead + Unpin>(mut reader: T) -> DocxResult<Self> {
+        use futures_lite::io::AsyncReadExt;
+        // Header consistency requires the central directory at the end of the archive.
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        Self::from_reader(std::io::Cursor::new(bytes))
     }
 }
